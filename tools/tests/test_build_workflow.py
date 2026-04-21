@@ -157,7 +157,6 @@ def test_user_invocable_workflow_e2e(tmp_path: Path) -> None:
     assert "$ARGUMENTS[2]" not in op_body
     assert "$3" in op_body
 
-
 # ---------------------------------------------------------------------------
 # 测试 2：internal workflow 端到端
 # ---------------------------------------------------------------------------
