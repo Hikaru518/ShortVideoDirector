@@ -41,6 +41,9 @@ DEFAULT_OPENCODE_ROOT = REPO_ROOT / ".opencode"
 # 业务 skill 源 frontmatter 仅允许这两个字段
 ALLOWED_SOURCE_SKILL_FIELDS = {"name", "description"}
 
+# workflow 源 frontmatter 仅允许这四个字段（argument-hint 可选）
+ALLOWED_SOURCE_WORKFLOW_FIELDS = {"name", "description", "user-invocable", "argument-hint"}
+
 # 双端产物 frontmatter 字段顺序（确定性，避免 git diff 噪音）
 CLAUDE_SKILL_FIELD_ORDER: tuple[str, ...] = (
     "name",
@@ -50,6 +53,43 @@ CLAUDE_SKILL_FIELD_ORDER: tuple[str, ...] = (
     "agent",
 )
 OPENCODE_SKILL_FIELD_ORDER: tuple[str, ...] = ("name", "description")
+
+# Claude workflow 产物字段顺序
+CLAUDE_WORKFLOW_FIELD_ORDER: tuple[str, ...] = (
+    "name",
+    "description",
+    "user-invocable",
+    "argument-hint",
+    "allowed-tools",
+)
+
+# opencode user-invocable workflow（commands/）字段顺序
+# 注意：不含 name —— opencode commands 以文件名为准
+OPENCODE_COMMAND_FIELD_ORDER: tuple[str, ...] = (
+    "description",
+    "agent",
+    "subtask",
+    "argument-hint",
+)
+
+# opencode internal workflow（skills/）字段顺序，与业务 skill 一致
+OPENCODE_INTERNAL_WORKFLOW_FIELD_ORDER: tuple[str, ...] = ("name", "description")
+
+# invoke 块识别 + $ARGUMENTS 索引识别
+_INVOKE_BLOCK_RE = re.compile(r"```invoke\n(.*?)\n```", re.DOTALL)
+# 同时匹配 `$ARGUMENTS[N]` 与切片记法 `$ARGUMENTS[N..]`（用于 generate-video
+# 描述「从该索引起的剩余参数」的场景）。group(1) 为索引数字，group(2) 为可选
+# 的切片标记 `..`。
+_ARGUMENTS_INDEX_RE = re.compile(r"\$ARGUMENTS\[(\d+)(\.\.)?\]")
+
+# opencode 端：当 invoke 块的 skill 指向 workflow（而非业务 skill）时使用的
+# fallback 措辞模板。Claude 端始终走 invoke_template；opencode 端业务 skill
+# 走 invoke_template（task 工具措辞），workflow target 走此 fallback。
+# 硬编码在此处（而非 runtime-config.yml）以保持 yaml 文件简洁；如需调整可
+# 直接改本字符串。
+_OPENCODE_WORKFLOW_FALLBACK_TEMPLATE = (
+    "使用 skill 工具加载 `{skill}` skill 的内容并按其描述执行{args_phrase}"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -317,18 +357,359 @@ def build_business_skills(
 
 
 # ---------------------------------------------------------------------------
+# Workflow 处理：invoke 块展开 + $ARGUMENTS 索引转换
+# ---------------------------------------------------------------------------
+
+
+def transform_arguments_indices(text: str, offset: int) -> str:
+    """`$ARGUMENTS[N]` → `$<N+offset>`，`$ARGUMENTS[N..]` → `$<N+offset>...`。
+
+    仅 opencode 端使用。
+
+    边界（regex 已保证）：
+        - 'ARGUMENTS[3]' 不带 $ → 不替换
+        - '$ARGUMENTS123' 不带 [] → 不替换
+        - '$ARGUMENTS[]' 空索引 → 不匹配（必须有数字）
+    """
+
+    def _sub(m: "re.Match[str]") -> str:
+        new_index = int(m.group(1)) + offset
+        slice_suffix = "..." if m.group(2) else ""
+        return f"${new_index}{slice_suffix}"
+
+    return _ARGUMENTS_INDEX_RE.sub(_sub, text)
+
+
+def expand_invoke_block(
+    invoke_yaml: dict[str, Any],
+    runtime: str,
+    config: dict[str, Any],
+    skill_to_owner: dict[str, str],
+    business_skill_set: set[str],
+) -> str:
+    """把单个 invoke 块的 yaml dict 展开为对应平台的自然语言段落。
+
+    runtime ∈ {'claude', 'opencode'}。
+
+    - Claude 端：所有 target 都走 invoke_template
+    - opencode 端：业务 skill 走 invoke_template（task 工具措辞），workflow
+      target 走 fallback 措辞（使用 skill 工具加载）
+    """
+    if runtime not in ("claude", "opencode"):
+        raise ValueError(f"未知 runtime: {runtime}")
+    skill = invoke_yaml.get("skill")
+    if not isinstance(skill, str) or not skill:
+        raise ValueError(f"invoke 块缺少 skill 字段: {invoke_yaml!r}")
+    args = invoke_yaml.get("args", "")
+    runtime_cfg = config["runtimes"][runtime]
+
+    # 空字符串 / None / 空白 → 视为无参数
+    if args is None or (isinstance(args, str) and args == ""):
+        args_phrase = runtime_cfg["invoke_no_args_phrase"]
+    else:
+        args_phrase = runtime_cfg["invoke_with_args_phrase"].format(args=args)
+
+    if runtime == "opencode" and skill not in business_skill_set:
+        return _OPENCODE_WORKFLOW_FALLBACK_TEMPLATE.format(
+            skill=skill, args_phrase=args_phrase
+        )
+
+    template = runtime_cfg["invoke_template"].rstrip("\n")
+    owner = skill_to_owner.get(skill, "")
+    # Claude 模板不引用 {owner}，但 .format() 接受多余 kwargs
+    return template.format(skill=skill, args_phrase=args_phrase, owner=owner)
+
+
+def _process_workflow_body(
+    body: str,
+    runtime: str,
+    config: dict[str, Any],
+    skill_to_owner: dict[str, str],
+    business_skill_set: set[str],
+    workflow_set: set[str],
+    src_path: Path,
+) -> str:
+    """对 workflow 正文执行 invoke 展开 + opencode 端的 $ARGUMENTS 转换。
+
+    fail-fast：invoke 块的 skill 字段不在 business_skill_set ∪ workflow_set
+    时立即 raise，错误信息含 src_path 与块原文便于排查。
+    """
+    valid_targets = business_skill_set | workflow_set
+
+    def _replace(m: "re.Match[str]") -> str:
+        block_text = m.group(1)
+        try:
+            invoke_yaml = yaml.safe_load(block_text)
+        except yaml.YAMLError as e:
+            raise ValueError(
+                f"workflow {src_path} 的 invoke 块 yaml 解析失败: {e}\n"
+                f"  块内容:\n{block_text}"
+            ) from e
+        if not isinstance(invoke_yaml, dict):
+            raise ValueError(
+                f"workflow {src_path} 的 invoke 块顶层不是 mapping: {block_text!r}"
+            )
+        skill = invoke_yaml.get("skill")
+        if skill not in valid_targets:
+            raise ValueError(
+                f"workflow {src_path} 的 invoke 块引用了不存在的 skill '{skill}'"
+                f"（不在业务 skill 也不在 workflow 列表中）。\n"
+                f"  块内容:\n{block_text}"
+            )
+        return expand_invoke_block(
+            invoke_yaml, runtime, config, skill_to_owner, business_skill_set
+        )
+
+    expanded = _INVOKE_BLOCK_RE.sub(_replace, body)
+    if runtime == "opencode":
+        offset = config["runtimes"]["opencode"].get("arguments_index_offset", 1)
+        expanded = transform_arguments_indices(expanded, offset)
+    return expanded
+
+
+def _validate_source_workflow(
+    post: frontmatter.Post, wf_name: str, src_path: Path
+) -> None:
+    """校验 workflow 源 frontmatter：仅允许 ALLOWED_SOURCE_WORKFLOW_FIELDS 子集。"""
+    extra = set(post.metadata.keys()) - ALLOWED_SOURCE_WORKFLOW_FIELDS
+    if extra:
+        raise ValueError(
+            f"src/workflows/{wf_name}.md 源 frontmatter 含非法字段 "
+            f"{sorted(extra)}（仅允许 {sorted(ALLOWED_SOURCE_WORKFLOW_FIELDS)}）"
+            f"\n  路径: {src_path}"
+        )
+    required = {"name", "description", "user-invocable"}
+    missing = required - set(post.metadata.keys())
+    if missing:
+        raise ValueError(
+            f"src/workflows/{wf_name}.md 源 frontmatter 缺少字段 "
+            f"{sorted(missing)}（必须含 {sorted(required)}）"
+            f"\n  路径: {src_path}"
+        )
+    if post.metadata.get("name") != wf_name:
+        raise ValueError(
+            f"src/workflows/{wf_name}.md frontmatter.name="
+            f"'{post.metadata.get('name')}' 与文件名 '{wf_name}' 不一致"
+            f"\n  路径: {src_path}"
+        )
+    if not isinstance(post.metadata.get("user-invocable"), bool):
+        raise ValueError(
+            f"src/workflows/{wf_name}.md frontmatter.user-invocable 必须为 bool"
+            f"（当前: {post.metadata.get('user-invocable')!r}）\n  路径: {src_path}"
+        )
+
+
+def _copy_workflow_attachments_dir(
+    src_subdir: Path, dest_dir: Path
+) -> list[Path]:
+    """递归复制 src/workflows/<name>/ 子目录下所有文件到 dest_dir/。
+
+    workflow 附属文件目前都是平坦结构（仅 1 层），此处复用 copy_attachments
+    的扁平复制语义；如未来出现深层嵌套可在此扩展。
+    """
+    copied: list[Path] = []
+    if not src_subdir.exists() or not src_subdir.is_dir():
+        return copied
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for child in sorted(src_subdir.iterdir()):
+        if not child.is_file():
+            continue
+        target = dest_dir / child.name
+        shutil.copy2(child, target)
+        copied.append(target)
+    return copied
+
+
+def build_workflows(
+    src_root: Path,
+    claude_root: Path,
+    opencode_root: Path,
+    config: dict[str, Any],
+    verbose: bool = False,
+) -> int:
+    """构建所有 workflow 的双端产物，返回处理的 workflow 数量。
+
+    输出路径：
+        - Claude（所有 workflow）：.claude/skills/<name>/SKILL.md
+        - opencode user_invocable：.opencode/commands/<name>.md
+        - opencode internal：.opencode/skills/<name>/SKILL.md
+        - opencode auto-video：.opencode/commands/auto-video.md（正文 = 降级模板）
+    """
+    src_workflows_dir = src_root / "workflows"
+    if not src_workflows_dir.exists():
+        raise FileNotFoundError(
+            f"src/workflows/ 不存在: {src_workflows_dir}"
+        )
+
+    workflows_cfg = config.get("workflows", {}) or {}
+    user_invocable = set(workflows_cfg.get("user_invocable", []) or [])
+    internal = set(workflows_cfg.get("internal", []) or [])
+    opencode_degrade = set(workflows_cfg.get("opencode_degrade", []) or [])
+    workflow_set = user_invocable | internal
+    degrade_template_map = config.get("opencode_degrade_template", {}) or {}
+
+    skill_to_owner = build_skill_to_owner_index(config)
+    business_skill_set = set(skill_to_owner.keys())
+
+    claude_runtime = config.get("runtimes", {}).get("claude", {}) or {}
+    opencode_runtime = config.get("runtimes", {}).get("opencode", {}) or {}
+    claude_user_inject = (
+        claude_runtime.get("workflow_user_invocable_inject", {}) or {}
+    )
+    claude_internal_inject = (
+        claude_runtime.get("workflow_internal_inject", {}) or {}
+    )
+    opencode_user_inject = (
+        opencode_runtime.get("workflow_user_invocable_inject", {}) or {}
+    )
+
+    workflow_files = sorted(
+        p for p in src_workflows_dir.iterdir()
+        if p.is_file() and p.suffix == ".md"
+    )
+
+    count = 0
+    for wf_file in workflow_files:
+        wf_name = wf_file.stem
+        post = parse_skill(wf_file)
+        _validate_source_workflow(post, wf_name, wf_file)
+
+        is_user_invocable = bool(post.metadata["user-invocable"])
+        # 配置一致性：源 frontmatter 与 runtime-config.yml 的 workflows 列表
+        if is_user_invocable and wf_name not in user_invocable:
+            raise ValueError(
+                f"workflow '{wf_name}' user-invocable=true 但不在 runtime-config.yml "
+                f"workflows.user_invocable 列表中。\n  路径: {wf_file}"
+            )
+        if not is_user_invocable and wf_name not in internal:
+            raise ValueError(
+                f"workflow '{wf_name}' user-invocable=false 但不在 runtime-config.yml "
+                f"workflows.internal 列表中。\n  路径: {wf_file}"
+            )
+
+        raw_body = extract_raw_body(wf_file)
+
+        # ---- Claude 端：所有 workflow 都进 .claude/skills/<name>/SKILL.md ----
+        claude_body = _process_workflow_body(
+            raw_body,
+            runtime="claude",
+            config=config,
+            skill_to_owner=skill_to_owner,
+            business_skill_set=business_skill_set,
+            workflow_set=workflow_set,
+            src_path=wf_file,
+        )
+        claude_inject = (
+            claude_user_inject if is_user_invocable else claude_internal_inject
+        )
+        claude_metadata = inject_frontmatter(
+            src_metadata=dict(post.metadata),
+            runtime_inject=claude_inject,
+            extra_fields=None,
+            field_order=CLAUDE_WORKFLOW_FIELD_ORDER,
+        )
+        claude_skill_dir = claude_root / "skills" / wf_name
+        claude_out = claude_skill_dir / "SKILL.md"
+        write_output(claude_metadata, claude_body, claude_out)
+
+        # ---- opencode 端 ----
+        if is_user_invocable:
+            # 正文：默认展开 invoke；auto-video 等 degrade 用降级模板替换
+            if wf_name in opencode_degrade:
+                if wf_name not in degrade_template_map:
+                    raise ValueError(
+                        f"workflow '{wf_name}' 在 opencode_degrade 列表中但 "
+                        f"opencode_degrade_template 缺少对应条目。"
+                    )
+                opencode_body = degrade_template_map[wf_name]
+            else:
+                opencode_body = _process_workflow_body(
+                    raw_body,
+                    runtime="opencode",
+                    config=config,
+                    skill_to_owner=skill_to_owner,
+                    business_skill_set=business_skill_set,
+                    workflow_set=workflow_set,
+                    src_path=wf_file,
+                )
+            # commands frontmatter：description + agent + subtask + argument-hint（无 name）
+            src_meta_no_name = {
+                k: v for k, v in post.metadata.items()
+                if k in {"description", "argument-hint"}
+            }
+            opencode_metadata = inject_frontmatter(
+                src_metadata=src_meta_no_name,
+                runtime_inject=opencode_user_inject,
+                extra_fields=None,
+                field_order=OPENCODE_COMMAND_FIELD_ORDER,
+            )
+            opencode_cmd_path = opencode_root / "commands" / f"{wf_name}.md"
+            write_output(opencode_metadata, opencode_body, opencode_cmd_path)
+            # 附属文件：src/workflows/<name>/ → .opencode/commands/<name>/
+            _copy_workflow_attachments_dir(
+                src_workflows_dir / wf_name,
+                opencode_root / "commands" / wf_name,
+            )
+        else:
+            # internal workflow → opencode skills/，frontmatter 与业务 skill 一致
+            opencode_body = _process_workflow_body(
+                raw_body,
+                runtime="opencode",
+                config=config,
+                skill_to_owner=skill_to_owner,
+                business_skill_set=business_skill_set,
+                workflow_set=workflow_set,
+                src_path=wf_file,
+            )
+            opencode_skill_meta = {
+                "name": post.metadata["name"],
+                "description": post.metadata["description"],
+            }
+            opencode_metadata = inject_frontmatter(
+                src_metadata=opencode_skill_meta,
+                runtime_inject={},
+                extra_fields=None,
+                field_order=OPENCODE_INTERNAL_WORKFLOW_FIELD_ORDER,
+            )
+            opencode_skill_path = (
+                opencode_root / "skills" / wf_name / "SKILL.md"
+            )
+            write_output(opencode_metadata, opencode_body, opencode_skill_path)
+
+        # 附属子目录复制到 Claude 端：src/workflows/<name>/* → .claude/skills/<name>/*
+        _copy_workflow_attachments_dir(
+            src_workflows_dir / wf_name,
+            claude_skill_dir,
+        )
+
+        if verbose:
+            print(f"[workflow] {wf_file} → claude:{claude_out}")
+
+        count += 1
+
+    return count
+
+
+# ---------------------------------------------------------------------------
 # Clean
 # ---------------------------------------------------------------------------
 
 
 def clean_outputs(claude_root: Path, opencode_root: Path, verbose: bool = False) -> None:
-    """清空双端 skills/ 产物目录（agents/commands 等由后续 task 负责）。"""
-    for root in (claude_root, opencode_root):
-        skills_dir = root / "skills"
-        if skills_dir.exists():
+    """清空双端产物目录：Claude skills + opencode skills/commands。
+
+    agents/ 由后续 task 接入。
+    """
+    targets = [
+        claude_root / "skills",
+        opencode_root / "skills",
+        opencode_root / "commands",
+    ]
+    for d in targets:
+        if d.exists():
             if verbose:
-                print(f"[clean] rm -rf {skills_dir}")
-            shutil.rmtree(skills_dir)
+                print(f"[clean] rm -rf {d}")
+            shutil.rmtree(d)
 
 
 # ---------------------------------------------------------------------------
@@ -384,10 +765,18 @@ def main(argv: list[str] | None = None) -> int:
         config=config,
         verbose=args.verbose,
     )
+    n_workflows = build_workflows(
+        src_root=DEFAULT_SRC_ROOT,
+        claude_root=DEFAULT_CLAUDE_ROOT,
+        opencode_root=DEFAULT_OPENCODE_ROOT,
+        config=config,
+        verbose=args.verbose,
+    )
 
     if args.verbose:
         print(f"[build] 业务 skill: {n_skills} 个 → 双端产物已生成")
-        print("[build] TODO(TASK-006/007): workflow / agent 双端构建尚未实现")
+        print(f"[build] workflow: {n_workflows} 个 → 双端产物已生成")
+        print("[build] TODO(TASK-007): agent 双端构建尚未实现")
 
     return 0
 
