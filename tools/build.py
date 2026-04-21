@@ -10,19 +10,22 @@
 
 按 tools/runtime-config.yml 的规则，将 src/{skills,agents,workflows}/
 canonical 源转换为 .claude/{skills,agents}/ + .opencode/{skills,commands,agents}/
-两端产物。
+两端产物，并生成 .claude-plugin/plugin.json + .opencode/opencode.json 两份 manifests。
 
-TASK-005 实现范围：
-    - 业务 skill：src/skills/<name>/ → .claude/skills/<name>/ + .opencode/skills/<name>/
-    - 附属文件（rules.md 等）原样复制到两端
-    - 顶层 `--check` / `--clean` / `--verbose` CLI 接口保留
+构建步骤（依次执行）：
+    1. 业务 skill：src/skills/<name>/ → 两端 skills/<name>/
+    2. workflow：src/workflows/<name>.md → 两端 commands/skills 按规则分发
+    3. agent：src/agents/<name>.md → 两端 agents/<name>.md
+    4. manifests：plugin.json（更新 skills/agents 路径）+ opencode.json（最小化）
 
-workflow / agent 的双端构建由后续 TASK-006/007 实现。
+`--clean` 会先清空两端 5 个产物子目录（skills/agents/commands），不动 manifests
+（manifests 由 build 直接重写覆盖）。
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import sys
@@ -37,9 +40,13 @@ DEFAULT_RUNTIME_CONFIG = REPO_ROOT / "tools" / "runtime-config.yml"
 DEFAULT_SRC_ROOT = REPO_ROOT / "src"
 DEFAULT_CLAUDE_ROOT = REPO_ROOT / ".claude"
 DEFAULT_OPENCODE_ROOT = REPO_ROOT / ".opencode"
+DEFAULT_PLUGIN_JSON = REPO_ROOT / ".claude-plugin" / "plugin.json"
 
 # 业务 skill 源 frontmatter 仅允许这两个字段
 ALLOWED_SOURCE_SKILL_FIELDS = {"name", "description"}
+
+# agent 源 frontmatter 仅允许这两个字段
+ALLOWED_SOURCE_AGENT_FIELDS = {"name", "description"}
 
 # workflow 源 frontmatter 仅允许这四个字段（argument-hint 可选）
 ALLOWED_SOURCE_WORKFLOW_FIELDS = {"name", "description", "user-invocable", "argument-hint"}
@@ -74,6 +81,12 @@ OPENCODE_COMMAND_FIELD_ORDER: tuple[str, ...] = (
 
 # opencode internal workflow（skills/）字段顺序，与业务 skill 一致
 OPENCODE_INTERNAL_WORKFLOW_FIELD_ORDER: tuple[str, ...] = ("name", "description")
+
+# Claude agent 产物字段顺序：name + description + tools + model
+CLAUDE_AGENT_FIELD_ORDER: tuple[str, ...] = ("name", "description", "tools", "model")
+
+# opencode agent 产物字段顺序：description + mode（不含 name；不含 model）
+OPENCODE_AGENT_FIELD_ORDER: tuple[str, ...] = ("description", "mode")
 
 # invoke 块识别 + $ARGUMENTS 索引识别
 _INVOKE_BLOCK_RE = re.compile(r"```invoke\n(.*?)\n```", re.DOTALL)
@@ -691,19 +704,194 @@ def build_workflows(
 
 
 # ---------------------------------------------------------------------------
+# Agent 双端构建
+# ---------------------------------------------------------------------------
+
+
+def _validate_source_agent(
+    post: frontmatter.Post, agent_name: str, src_path: Path
+) -> None:
+    """agent 源 frontmatter 仅允许 name + description。"""
+    extra = set(post.metadata.keys()) - ALLOWED_SOURCE_AGENT_FIELDS
+    if extra:
+        raise ValueError(
+            f"src/agents/{agent_name}.md 源 frontmatter 含非法字段 "
+            f"{sorted(extra)}（仅允许 {sorted(ALLOWED_SOURCE_AGENT_FIELDS)}）"
+            f"\n  路径: {src_path}"
+        )
+    missing = ALLOWED_SOURCE_AGENT_FIELDS - set(post.metadata.keys())
+    if missing:
+        raise ValueError(
+            f"src/agents/{agent_name}.md 源 frontmatter 缺少字段 "
+            f"{sorted(missing)}（必须含 {sorted(ALLOWED_SOURCE_AGENT_FIELDS)}）"
+            f"\n  路径: {src_path}"
+        )
+    if post.metadata.get("name") != agent_name:
+        raise ValueError(
+            f"src/agents/{agent_name}.md frontmatter.name="
+            f"'{post.metadata.get('name')}' 与文件名 '{agent_name}' 不一致"
+            f"\n  路径: {src_path}"
+        )
+
+
+def process_agent(
+    src_path: Path, runtime: str, config: dict[str, Any]
+) -> tuple[dict[str, Any], str]:
+    """解析单个 agent 源文件，按 runtime 注入 frontmatter，返回 (metadata, body)。
+
+    runtime ∈ {'claude', 'opencode'}。
+    - Claude：注入 tools + model（保留 name + description）
+    - opencode：注入 mode（保留 description；丢弃 name）
+    """
+    if runtime not in ("claude", "opencode"):
+        raise ValueError(f"未知 runtime: {runtime}")
+
+    agent_name = src_path.stem
+    post = parse_skill(src_path)
+    _validate_source_agent(post, agent_name, src_path)
+    raw_body = extract_raw_body(src_path)
+
+    runtime_inject = (
+        config.get("runtimes", {}).get(runtime, {}).get("agent_inject", {}) or {}
+    )
+
+    if runtime == "claude":
+        metadata = inject_frontmatter(
+            src_metadata=dict(post.metadata),
+            runtime_inject=runtime_inject,
+            extra_fields=None,
+            field_order=CLAUDE_AGENT_FIELD_ORDER,
+        )
+    else:
+        # opencode：drop name（agent 名以文件名为准）
+        src_meta_no_name = {
+            k: v for k, v in post.metadata.items() if k != "name"
+        }
+        metadata = inject_frontmatter(
+            src_metadata=src_meta_no_name,
+            runtime_inject=runtime_inject,
+            extra_fields=None,
+            field_order=OPENCODE_AGENT_FIELD_ORDER,
+        )
+
+    return metadata, raw_body
+
+
+def build_agents(
+    src_root: Path,
+    claude_root: Path,
+    opencode_root: Path,
+    config: dict[str, Any],
+    verbose: bool = False,
+) -> int:
+    """构建所有 agent 的双端产物，返回处理的 agent 数量。
+
+    fail-fast：runtime-config.yml 的 agents mapping 中所有 owner 都必须有对应的
+    src/agents/<owner>.md 文件；缺失则立即 raise。
+    """
+    src_agents_dir = src_root / "agents"
+    if not src_agents_dir.exists():
+        raise FileNotFoundError(f"src/agents/ 不存在: {src_agents_dir}")
+
+    agents_cfg = config.get("agents")
+    if not isinstance(agents_cfg, dict):
+        raise ValueError("runtime-config.yml 缺少 agents mapping 或类型错误")
+    expected_owners = sorted(agents_cfg.keys())
+
+    count = 0
+    for owner in expected_owners:
+        src_path = src_agents_dir / f"{owner}.md"
+        if not src_path.exists():
+            raise FileNotFoundError(
+                f"agent '{owner}' 在 runtime-config.yml agents mapping 中声明，"
+                f"但源文件不存在。\n  期望路径: {src_path}"
+            )
+
+        claude_meta, body = process_agent(src_path, "claude", config)
+        opencode_meta, _ = process_agent(src_path, "opencode", config)
+
+        claude_out = claude_root / "agents" / f"{owner}.md"
+        opencode_out = opencode_root / "agents" / f"{owner}.md"
+        write_output(claude_meta, body, claude_out)
+        write_output(opencode_meta, body, opencode_out)
+
+        if verbose:
+            print(f"[agent] {src_path} → {claude_out}, {opencode_out}")
+
+        count += 1
+
+    return count
+
+
+# ---------------------------------------------------------------------------
+# Manifests 生成
+# ---------------------------------------------------------------------------
+
+
+def generate_plugin_json(plugin_json_path: Path) -> None:
+    """读取现有 .claude-plugin/plugin.json，更新 skills 字段为 `./.claude/skills/`，
+    新增 agents 字段 `./.claude/agents/`，保留 name/version/description。
+
+    若文件不存在则 raise FileNotFoundError（plugin.json 是版本化资产，应一直存在）。
+    """
+    if not plugin_json_path.exists():
+        raise FileNotFoundError(
+            f".claude-plugin/plugin.json 不存在: {plugin_json_path}"
+        )
+    existing = json.loads(plugin_json_path.read_text(encoding="utf-8"))
+    if not isinstance(existing, dict):
+        raise ValueError(
+            f"plugin.json 顶层不是 object: {plugin_json_path}"
+        )
+
+    output = {
+        "name": existing.get("name", "short-video-director"),
+        "version": existing.get("version", "1.0.0"),
+        "description": existing.get("description", ""),
+        "skills": "./.claude/skills/",
+        "agents": "./.claude/agents/",
+    }
+    plugin_json_path.parent.mkdir(parents=True, exist_ok=True)
+    plugin_json_path.write_text(
+        json.dumps(output, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def generate_opencode_json(opencode_root: Path) -> None:
+    """生成 .opencode/opencode.json：按 ADR-006 最小化（$schema + permission allow-all）。"""
+    output = {
+        "$schema": "https://opencode.ai/config.json",
+        "permission": {
+            "edit": "allow",
+            "bash": "allow",
+            "webfetch": "allow",
+        },
+    }
+    opencode_root.mkdir(parents=True, exist_ok=True)
+    (opencode_root / "opencode.json").write_text(
+        json.dumps(output, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Clean
 # ---------------------------------------------------------------------------
 
 
 def clean_outputs(claude_root: Path, opencode_root: Path, verbose: bool = False) -> None:
-    """清空双端产物目录：Claude skills + opencode skills/commands。
+    """清空双端产物目录：Claude skills/agents + opencode skills/commands/agents。
 
-    agents/ 由后续 task 接入。
+    保留：.claude/projects/、用户本地状态、.opencode/opencode.json、
+    .claude-plugin/plugin.json（manifests 由 build 直接重写）。
     """
     targets = [
         claude_root / "skills",
+        claude_root / "agents",
         opencode_root / "skills",
         opencode_root / "commands",
+        opencode_root / "agents",
     ]
     for d in targets:
         if d.exists():
@@ -730,7 +918,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--clean",
         action="store_true",
-        help="先清空已有双端产物（仅 skills/）再生成",
+        help="先清空两端 skills/agents/commands 产物再生成（不动 manifests）",
     )
     parser.add_argument(
         "--verbose",
@@ -772,11 +960,22 @@ def main(argv: list[str] | None = None) -> int:
         config=config,
         verbose=args.verbose,
     )
+    n_agents = build_agents(
+        src_root=DEFAULT_SRC_ROOT,
+        claude_root=DEFAULT_CLAUDE_ROOT,
+        opencode_root=DEFAULT_OPENCODE_ROOT,
+        config=config,
+        verbose=args.verbose,
+    )
+
+    generate_plugin_json(DEFAULT_PLUGIN_JSON)
+    generate_opencode_json(DEFAULT_OPENCODE_ROOT)
 
     if args.verbose:
         print(f"[build] 业务 skill: {n_skills} 个 → 双端产物已生成")
         print(f"[build] workflow: {n_workflows} 个 → 双端产物已生成")
-        print("[build] TODO(TASK-007): agent 双端构建尚未实现")
+        print(f"[build] agent: {n_agents} 个 → 双端产物已生成")
+        print(f"[build] manifests: {DEFAULT_PLUGIN_JSON.name} + opencode.json 已写入")
 
     return 0
 
