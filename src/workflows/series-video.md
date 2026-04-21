@@ -2,7 +2,6 @@
 name: series-video
 description: 将故事创意转化为AI视频分镜提示词和资产图像提示词。支持持续创作，自动检测新故事/续写模式。输入故事点子、原文或概述，输出完整的分镜和资产提示词。使用 /series-video 启动，/series-video config 编辑配置。
 user-invocable: true
-allowed-tools: Read, Write, Edit, Glob, Bash, Agent, Skill
 argument-hint: "[总集数] [故事材料|文件路径]"
 ---
 
@@ -14,8 +13,8 @@ argument-hint: "[总集数] [故事材料|文件路径]"
 2. **模式检测** — 检查 [story/](story/) 是否存在，确定新故事模式或续写模式
 3. **输入解析** — 解析用户输入，确定故事来源（内联文本/文件/交互式/Director 生成）
 4. **执行工作流** — 根据模式进入对应工作流：
-   - 新故事 → 使用 Skill tool 调用 `new-story` skill，传递参数：total_episodes(可选), story_input(可选), work_mode
-   - 续写 → 使用 Skill tool 调用 `continue-story` skill，传递参数：total_episodes(可选), story_input(可选), work_mode
+   - 新故事 → 调用 `new-story` 工作流（参数：total_episodes(可选), story_input(可选), work_mode）
+   - 续写 → 调用 `continue-story` 工作流（参数：total_episodes(可选), story_input(可选), work_mode）
 
 **版权规避：所有生成内容（大纲、小说、分镜、资产提示词等）不得出现现实中的明星或公众人物名字、真实地名、商标名或其他受版权/商标保护的名称，必要时使用虚构替代名称。**
 
@@ -25,7 +24,7 @@ argument-hint: "[总集数] [故事材料|文件路径]"
 
 1. 使用 Read 工具检查当前工作目录下是否存在 [config.md](config.md)
 2. 若已存在 → 读取并解析配置值
-3. 若不存在 → 进入**交互式配置引导**（仅首次运行），参考 [config-template.md](config-template.md) 模板进行交互式配置引导，逐个询问每项配置，每次只问一个，提供多选项供用户选择：
+3. 若不存在 → 进入**交互式配置引导**（仅首次运行），参考 [config-template.md](series-video/config-template.md) 模板进行交互式配置引导，逐个询问每项配置，每次只问一个，提供多选项供用户选择：
 
    **第 1 项：图像模型**
    - A) none（不生成图像）
@@ -167,10 +166,20 @@ argument-hint: "[总集数] [故事材料|文件路径]"
 
 ## 阶段 4: 执行工作流
 
-根据模式检测结果，使用 Skill tool 调用对应工作流 skill：
+根据模式检测结果，执行对应工作流：
 
-- **新故事模式** → 使用 Skill tool 调用 `new-story` skill，传递参数：`{work_mode} {total_episodes} "{story_input}"`
-- **续写模式** → 使用 Skill tool 调用 `continue-story` skill，传递参数：`{work_mode} {total_episodes} "{story_input}"`
+- **新故事模式** → 调用 `new-story`：
+
+```invoke
+skill: new-story
+args: '{work_mode} {total_episodes} "{story_input}"'
+```
+- **续写模式** → 调用 `continue-story`：
+
+```invoke
+skill: continue-story
+args: '{work_mode} {total_episodes} "{story_input}"'
+```
 
 参数说明：
 - `$ARGUMENTS[0]` = work_mode（default / full-auto）

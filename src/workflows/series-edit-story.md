@@ -2,7 +2,6 @@
 name: series-edit-story
 description: 对多集系列的任意内容（资产、大纲、小说、分镜）提出修改意见。通过对话协商确定方案后，按级联 DAG 按需执行修正。使用 /series-edit-story 加自然语言描述触发。
 user-invocable: true
-allowed-tools: Read, Write, Edit, Glob, Bash, Skill
 argument-hint: "[自然语言修改意见]"
 ---
 

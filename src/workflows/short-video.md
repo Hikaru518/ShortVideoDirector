@@ -2,7 +2,6 @@
 name: short-video
 description: 将故事创意转化为单集短视频的分镜提示词和资产图像提示词。输入故事点子或概述，输出完整的剧本、分镜和资产提示词。使用 /short-video 启动，/short-video config 编辑配置。
 user-invocable: true
-allowed-tools: Read, Write, Edit, Glob, Bash, Agent, Skill
 argument-hint: "[故事材料|文件路径]"
 ---
 
@@ -23,7 +22,7 @@ argument-hint: "[故事材料|文件路径]"
 
 1. 使用 Read 工具检查当前工作目录下是否存在 [config.md](config.md)
 2. 若已存在 → 读取并解析配置值
-3. 若不存在 → 进入**交互式配置引导**（仅首次运行），参考 [config-template.md](config-template.md) 模板进行交互式配置引导，逐个询问每项配置，每次只问一个，提供多选项供用户选择：
+3. 若不存在 → 进入**交互式配置引导**（仅首次运行），参考 [config-template.md](short-video/config-template.md) 模板进行交互式配置引导，逐个询问每项配置，每次只问一个，提供多选项供用户选择：
 
    **第 1 项：图像模型**
    - A) none（不生成图像）
@@ -133,8 +132,18 @@ argument-hint: "[故事材料|文件路径]"
 1. 使用 Bash 创建目录结构：`story/`、`story/episodes/ep01/`、`assets/characters/`、`assets/items/`、`assets/locations/`、`assets/buildings/`
 
 2. 根据故事材料进行输入分流：
-   - **有故事材料** → 使用 Skill tool 调用 `short-input-confirm` skill，传递参数：`"{story_input}"`，等待用户确认
-   - **无故事材料** → 使用 Skill tool 调用 `short-plot-options` skill，等待用户选择
+   - **有故事材料** → 调用 `short-input-confirm` ，等待用户确认：
+
+```invoke
+skill: short-input-confirm
+args: '"{story_input}"'
+```
+   - **无故事材料** → 调用 `short-plot-options` ，等待用户选择：
+
+```invoke
+skill: short-plot-options
+args: ""
+```
 
 ## 阶段 4: 执行工作流
 
@@ -142,41 +151,91 @@ argument-hint: "[故事材料|文件路径]"
 
 **4.1 Director — 生成大纲：**
 
-使用 Skill tool 调用 `short-outline` skill，传递参数：`"{用户确认的剧情方向文本}"`
+调用 `short-outline`：
+
+```invoke
+skill: short-outline
+args: '"{用户确认的剧情方向文本}"'
+```
 
 **4.2 Scriptwriter — 写剧本：**
 
-使用 Skill tool 调用 `scriptwriter-script` skill，传递参数：`ep01`
+调用 `scriptwriter-script`：
+
+```invoke
+skill: scriptwriter-script
+args: "ep01"
+```
 
 **4.3 Director — 审核剧本：**
 
-1. 使用 Skill tool 调用 `director-review-script` skill，传递参数：`ep01`
-2. 若"需修改"→ 使用 Skill tool 调用 `scriptwriter-fix-script` skill，传递参数：`ep01 "{修改意见}"`（最多 2 轮）
+1. 调用 `director-review-script`：
+
+```invoke
+skill: director-review-script
+args: "ep01"
+```
+2. 若"需修改"→ 调用 `scriptwriter-fix-script`（最多 2 轮）：
+
+```invoke
+skill: scriptwriter-fix-script
+args: 'ep01 "{修改意见}"'
+```
 
 **4.4 Storyboarder — 提取资产清单：**
 
-使用 Skill tool 调用 `storyboarder-asset-list` skill，传递参数：`ep01`
+调用 `storyboarder-asset-list`：
+
+```invoke
+skill: storyboarder-asset-list
+args: "ep01"
+```
 
 **4.5 Creator — 创建资产：**
 
-使用 Skill tool 调用 `creator-create-assets` skill，传递参数：`ep01`
+调用 `creator-create-assets`：
+
+```invoke
+skill: creator-create-assets
+args: "ep01"
+```
 
 **4.6 生成分镜 + 生成资产图片（并行）：**
 
 若 config 中图像模型非 `none`，以下两条线并行执行（分镜流程不等待图片完成）：
 
 **图片生成线（后台）：**
-使用 Skill tool 调用 `creator-generate-images` skill，传递参数：`ep01`
+调用 `creator-generate-images`：
+
+```invoke
+skill: creator-generate-images
+args: "ep01"
+```
 
 **分镜流程线（前台，正常推进）：**
-1. 使用 Skill tool 调用 `short-storyboard` skill，传递参数：`ep01`
+1. 调用 `short-storyboard`：
+
+```invoke
+skill: short-storyboard
+args: "ep01"
+```
 
 若 config 中图像模型为 `none`，仅执行分镜流程线。
 
 **4.7 Director — 审核分镜：**
 
-1. 使用 Skill tool 调用 `short-review-storyboard` skill，传递参数：`ep01`
-2. 若"需修改"→ 使用 Skill tool 调用 `short-fix-storyboard` skill，传递参数：`ep01 "{修改意见}"`（最多 2 轮）
+1. 调用 `short-review-storyboard`：
+
+```invoke
+skill: short-review-storyboard
+args: "ep01"
+```
+2. 若"需修改"→ 调用 `short-fix-storyboard`（最多 2 轮）：
+
+```invoke
+skill: short-fix-storyboard
+args: 'ep01 "{修改意见}"'
+```
 
 **4.8 完成：**
 

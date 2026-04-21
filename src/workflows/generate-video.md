@@ -2,7 +2,6 @@
 name: generate-video
 description: 将分镜提示词提交为视频生成任务。读取分镜和资产图片，提交到即梦CLI，异步跟踪任务状态。使用 /generate-video ep01 提交整集，或 /generate-video ep01 镜头3 镜头5 提交指定镜头。
 user-invocable: true
-allowed-tools: Read, Write, Edit, Glob, Bash, Skill
 argument-hint: "集数 [镜头N ...]"
 ---
 
@@ -68,11 +67,21 @@ argument-hint: "集数 [镜头N ...]"
 ### 阶段 5: 提交任务
 
 1. 读取 `config.md` 获取视频模型值
-2. 使用 Skill tool 调用 `creator-video-{视频模型值}` skill，传递参数：`{集数} {目标 pending 镜头编号列表，如 "1 3 5" 或 "all"}`
+2. 调用 `creator-video-{视频模型值}`：
+
+```invoke
+skill: creator-video-dreamina
+args: '{集数} {目标 pending 镜头编号列表，如 "1 3 5" 或 "all"}'
+```
 
 ### 阶段 6: 启动自动监控
 
-1. 使用 Skill tool 调用 `auto-video` skill，传递参数：`{集数} 1200`
+1. 调用 `auto-video`：
+
+```invoke
+skill: auto-video
+args: "{集数} 1200"
+```
 
 ### 阶段 7: 完成
 

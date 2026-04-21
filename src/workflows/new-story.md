@@ -2,7 +2,6 @@
 name: new-story
 description: 新故事工作流。从零开始创建第一集：剧情选项→大纲→小说→资产→分镜，完整的单集生成流程。
 user-invocable: false
-allowed-tools: Read, Write, Edit, Glob, Bash, Skill
 ---
 
 # New Story 工作流
@@ -29,7 +28,12 @@ allowed-tools: Read, Write, Edit, Glob, Bash, Skill
 
 ### 阶段 2a: Director 生成主题选项
 
-1. 使用 Skill tool 调用 `director-plot-options` skill（无参数）
+1. 调用 `director-plot-options`：
+
+```invoke
+skill: director-plot-options
+args: ""
+```
 2. 展示选项给用户：
    - **A/B/C** — 选择对应主题方向
    - **D. 重新生成** — 重新调用 `director-plot-options` skill（无参数），生成全新 3 个方向
@@ -39,7 +43,12 @@ allowed-tools: Read, Write, Edit, Glob, Bash, Skill
 
 ### 阶段 2b: Director 生成输入确认说明
 
-1. 使用 Skill tool 调用 `director-input-confirm` skill，传递参数：`"$ARGUMENTS[2]"`
+1. 调用 `director-input-confirm`：
+
+```invoke
+skill: director-input-confirm
+args: '"$ARGUMENTS[2]"'
+```
 2. 展示说明给用户：
    - **A. 确认** — 继续阶段 3
    - **B. 重新生成** — 重新调用 `director-input-confirm` skill，传递参数：`"{用户故事输入}"`
@@ -49,56 +58,116 @@ allowed-tools: Read, Write, Edit, Glob, Bash, Skill
 
 ### 阶段 2.5: 生成剧情弧线（仅当 `$ARGUMENTS[1]` 非空且 story/arc.md 不存在时执行）
 
-1. 使用 Skill tool 调用 `director-arc` skill，传递参数：`$ARGUMENTS[1] "{选定的剧情方向}"`
+1. 调用 `director-arc`：
+
+```invoke
+skill: director-arc
+args: '$ARGUMENTS[1] "{选定的剧情方向}"'
+```
 
 ### 阶段 3: Director 生成剧情大纲
 
-1. 使用 Skill tool 调用 `director-outline` skill，传递参数：`ep01 "{选定的剧情方向}"`
+1. 调用 `director-outline`：
+
+```invoke
+skill: director-outline
+args: 'ep01 "{选定的剧情方向}"'
+```
 
 ### 阶段 4: Writer 生成小说原文
 
 **4.1 Writer — 生成小说原文：**
 
-1. 使用 Skill tool 调用 `writer-novel` skill，传递参数：`ep01`
+1. 调用 `writer-novel`：
+
+```invoke
+skill: writer-novel
+args: "ep01"
+```
 
 **4.1b 字数校验：**
 
 1. 使用 Bash 调用 `bash scripts/word-count.sh story/episodes/ep01/novel.md` 统计字数（自动检测语言）
 2. 对比 config.md 中的 `每集小说字数` 范围
-3. 若不在范围内 → 使用 Skill tool 调用 `writer-fix-novel` skill，传递参数：`ep01 "当前字数为{实际字数}，目标范围为{下限}-{上限}，请调整内容使字数符合要求"`（最多 2 轮，每轮修正后重新统计）
+3. 若不在范围内 → 调用 `writer-fix-novel`（最多 2 轮，每轮修正后重新统计）：
+
+```invoke
+skill: writer-fix-novel
+args: 'ep01 "当前字数为{实际字数}，目标范围为{下限}-{上限}，请调整内容使字数符合要求"'
+```
 
 **4.2 Director — 审核小说原文：**
 
-1. 使用 Skill tool 调用 `director-review-novel` skill，传递参数：`ep01`
-2. 若"需修改"→ 使用 Skill tool 调用 `writer-fix-novel` skill，传递参数：`ep01 "{修改意见}"`（最多 2 轮）
+1. 调用 `director-review-novel`：
+
+```invoke
+skill: director-review-novel
+args: "ep01"
+```
+2. 若"需修改"→ 调用 `writer-fix-novel`（最多 2 轮）：
+
+```invoke
+skill: writer-fix-novel
+args: 'ep01 "{修改意见}"'
+```
 
 ### 阶段 5: 资产创建 + 分镜生成
 
 **5a. Storyboarder — 生成资产清单：**
 
-1. 使用 Skill tool 调用 `storyboarder-asset-list` skill，传递参数：`ep01`
+1. 调用 `storyboarder-asset-list`：
+
+```invoke
+skill: storyboarder-asset-list
+args: "ep01"
+```
    → 将资产清单写入 ep01/outline.md
 
 **5b. 创建资产：**
 
-1. 使用 Skill tool 调用 `creator-create-assets` skill，传递参数：`ep01`
+1. 调用 `creator-create-assets`：
+
+```invoke
+skill: creator-create-assets
+args: "ep01"
+```
 
 **5c. 生成分镜 + 生成资产图片（并行）：**
 
 若 config 中图像模型非 `none`，以下两条线并行执行（分镜流程不等待图片完成）：
 
 **图片生成线（后台）：**
-使用 Skill tool 调用 `creator-generate-images` skill，传递参数：`ep01`
+调用 `creator-generate-images`：
+
+```invoke
+skill: creator-generate-images
+args: "ep01"
+```
 
 **分镜流程线（前台，正常推进）：**
-1. 使用 Skill tool 调用 `storyboarder-storyboard` skill，传递参数：`ep01`
+1. 调用 `storyboarder-storyboard`：
+
+```invoke
+skill: storyboarder-storyboard
+args: "ep01"
+```
 
 若 config 中图像模型为 `none`，仅执行分镜流程线。
 
 **5d. Director — 审核分镜：**
 
-1. 使用 Skill tool 调用 `director-review-storyboard` skill，传递参数：`ep01`
-2. 若"需修改"→ 使用 Skill tool 调用 `storyboarder-fix-storyboard` skill，传递参数：`ep01 "{修改意见}"`（最多 2 轮）
+1. 调用 `director-review-storyboard`：
+
+```invoke
+skill: director-review-storyboard
+args: "ep01"
+```
+2. 若"需修改"→ 调用 `storyboarder-fix-storyboard`（最多 2 轮）：
+
+```invoke
+skill: storyboarder-fix-storyboard
+args: 'ep01 "{修改意见}"'
+```
 
 ### 阶段 6: 完成
 

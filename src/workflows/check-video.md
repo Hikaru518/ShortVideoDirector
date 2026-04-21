@@ -2,7 +2,6 @@
 name: check-video
 description: 查询视频生成任务的状态，下载已完成的视频，处理失败的任务。使用 /check-video ep01 查询。
 user-invocable: true
-allowed-tools: Read, Write, Edit, Glob, Bash, Skill
 argument-hint: "集数 [--auto]"
 ---
 
@@ -98,7 +97,7 @@ argument-hint: "集数 [--auto]"
 
 ### 阶段 5: 失败处理（仅当有 failed 任务时）
 
-对每个 status 为 `failed` 的任务，按 `skills/check-video/failure-classification.md` 中的规则分类为"可自动重试"或"需人工介入"。每次失败都重新分类（同一镜头多次失败原因可能不同）。
+对每个 status 为 `failed` 的任务，按 `src/workflows/check-video/failure-classification.md` 中的规则分类为"可自动重试"或"需人工介入"。每次失败都重新分类（同一镜头多次失败原因可能不同）。
 
 **a. 可自动重试的任务：**
 1. 告知用户该镜头因临时原因失败，正在自动重试
