@@ -59,7 +59,6 @@ CONFIG = {
         "internal": ["nested-flow"],
         "opencode_degrade": [],
     },
-    "opencode_degrade_template": {},
 }
 
 

@@ -1,10 +1,14 @@
-"""tools/tests/test_build_degrade.py — TASK-006 auto-video opencode 降级。
+"""tools/tests/test_build_degrade.py — opencode degrade 退役回归测试。
 
-覆盖：
-- opencode 端 auto-video 正文 = degrade_template（不展开 invoke 块）
-- Claude 端 auto-video 正文展开 invoke 块（保持完整流程）
-- opencode 端 auto-video 输出到 .opencode/commands/auto-video.md，含 agent: build + subtask: true
-- Claude 端 auto-video 输出到 .claude/skills/auto-video/SKILL.md，含 user-invocable: true
+历史背景：auto-video 曾在 opencode 端走「降级模板」分支（CronCreate 不可用），
+runtime-config.yml 的 `workflows.opencode_degrade` + `opencode_degrade_template`
+负责注入降级文档。自 sleep-loop 改造后，auto-video 在两端原生支持，degrade
+机制整体退役。
+
+本文件确认：
+- 真实仓库的 runtime-config.yml 已清空 opencode_degrade 并删除模板 key
+- build_workflows 对 user_invocable workflow 一视同仁地展开 invoke 块（不再
+  对 auto-video 走 degrade 模板分支），两端正文等价（仅 $ARGUMENTS 索引差异）
 """
 
 from __future__ import annotations
@@ -13,16 +17,16 @@ import re
 import sys
 from pathlib import Path
 
+import yaml
+
 TOOLS_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(TOOLS_DIR))
 
 import build  # type: ignore[import-not-found]  # noqa: E402
 
+REPO_ROOT = TOOLS_DIR.parent
+RUNTIME_CONFIG_PATH = TOOLS_DIR / "runtime-config.yml"
 
-DEGRADE_TEXT = (
-    "`/auto-video` 在 opencode 端不支持自动定时监控（依赖 Cron 工具组）。\n"
-    "请使用操作系统调度调用 `/check-video <ep>`：\n"
-)
 
 CONFIG = {
     "agents": {"director": ["foo-skill"]},
@@ -57,9 +61,8 @@ CONFIG = {
     "workflows": {
         "user_invocable": ["auto-video"],
         "internal": [],
-        "opencode_degrade": ["auto-video"],
+        "opencode_degrade": [],
     },
-    "opencode_degrade_template": {"auto-video": DEGRADE_TEXT},
 }
 
 
@@ -68,8 +71,6 @@ def _strip_frontmatter(text: str) -> str:
 
 
 def _parse_frontmatter(text: str) -> dict:
-    import yaml
-
     m = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
     assert m is not None
     return yaml.safe_load(m.group(1))
@@ -92,7 +93,41 @@ def _write_skill(src_root: Path, name: str) -> None:
     )
 
 
-def test_opencode_auto_video_body_replaced_by_degrade_template(tmp_path: Path) -> None:
+# ---------------------------------------------------------------------------
+# 仓库配置回归
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_config_opencode_degrade_retired() -> None:
+    """真实 runtime-config.yml：opencode_degrade 必须为空 list 且无模板 key。"""
+    cfg = yaml.safe_load(RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
+    assert isinstance(cfg, dict)
+
+    workflows = cfg.get("workflows")
+    assert isinstance(workflows, dict), "workflows 顶层须为 mapping"
+    assert "opencode_degrade" in workflows, (
+        "保留 opencode_degrade key（即使为空）以记录该机制已退役"
+    )
+    assert workflows["opencode_degrade"] == [], (
+        f"opencode_degrade 必须为空 list（当前: {workflows['opencode_degrade']}）"
+    )
+
+    assert "opencode_degrade_template" not in cfg, (
+        "顶层不得再出现 opencode_degrade_template key（已随 degrade 机制退役）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# build 行为：auto-video 在两端走同一展开路径
+# ---------------------------------------------------------------------------
+
+
+def test_auto_video_built_uniformly_on_both_runtimes(tmp_path: Path) -> None:
+    """opencode 端的 auto-video 不再走 degrade 模板，走与 Claude 端同样的 invoke 展开路径。
+
+    同一个 invoke 块在两端都被展开为各自平台的 sub-agent 调用句式，且原文中
+    其他段落（如本测试的 "Sleep loop 等待" 标记）在两端都被保留。
+    """
     src_root = tmp_path / "src"
     claude_root = tmp_path / ".claude"
     opencode_root = tmp_path / ".opencode"
@@ -102,45 +137,13 @@ def test_opencode_auto_video_body_replaced_by_degrade_template(tmp_path: Path) -
         "## 流程\n\n"
         "1. 调用 foo-skill：\n\n"
         "```invoke\nskill: foo-skill\nargs: \"\"\n```\n\n"
-        "Cron 工具说明 etc.\n"
+        "Sleep loop 等待\n"
     )
     _write_workflow(
         src_root,
         "auto-video",
-        "name: auto-video\ndescription: 自动监控\nuser-invocable: true\nargument-hint: \"[集数]\"\n",
-        body_with_invoke,
-    )
-
-    build.build_workflows(
-        src_root=src_root,
-        claude_root=claude_root,
-        opencode_root=opencode_root,
-        config=CONFIG,
-    )
-
-    opencode_out = opencode_root / "commands" / "auto-video.md"
-    assert opencode_out.exists()
-    op_body = _strip_frontmatter(opencode_out.read_text(encoding="utf-8"))
-    assert op_body == DEGRADE_TEXT, f"opencode auto-video 正文未替换为降级模板: {op_body!r}"
-    assert "```invoke" not in op_body
-    assert "foo-skill" not in op_body  # 降级模板不含原 invoke 内容
-
-
-def test_claude_auto_video_body_expanded_normally(tmp_path: Path) -> None:
-    src_root = tmp_path / "src"
-    claude_root = tmp_path / ".claude"
-    opencode_root = tmp_path / ".opencode"
-
-    _write_skill(src_root, "foo-skill")
-    body_with_invoke = (
-        "## 流程\n\n"
-        "```invoke\nskill: foo-skill\nargs: \"\"\n```\n\n"
-        "Cron 工具说明\n"
-    )
-    _write_workflow(
-        src_root,
-        "auto-video",
-        "name: auto-video\ndescription: 自动监控\nuser-invocable: true\nargument-hint: \"[集数]\"\n",
+        "name: auto-video\ndescription: 自动监控\nuser-invocable: true\n"
+        "argument-hint: \"[集数]\"\n",
         body_with_invoke,
     )
 
@@ -152,14 +155,23 @@ def test_claude_auto_video_body_expanded_normally(tmp_path: Path) -> None:
     )
 
     claude_out = claude_root / "skills" / "auto-video" / "SKILL.md"
+    opencode_out = opencode_root / "commands" / "auto-video.md"
     assert claude_out.exists()
+    assert opencode_out.exists()
+
     cl_body = _strip_frontmatter(claude_out.read_text(encoding="utf-8"))
+    op_body = _strip_frontmatter(opencode_out.read_text(encoding="utf-8"))
+
     assert "```invoke" not in cl_body
+    assert "```invoke" not in op_body
     assert "使用 Skill tool 调用 `foo-skill` skill" in cl_body
-    assert "Cron 工具说明" in cl_body  # 正常展开正文，保留其他段落
+    assert "调用 task 工具，传入 agent: `director`" in op_body
+    assert "Sleep loop 等待" in cl_body
+    assert "Sleep loop 等待" in op_body
 
 
-def test_opencode_auto_video_frontmatter_includes_command_fields(tmp_path: Path) -> None:
+def test_opencode_auto_video_command_frontmatter(tmp_path: Path) -> None:
+    """opencode 端 auto-video 仍写到 commands/，frontmatter 含 agent/subtask/description。"""
     src_root = tmp_path / "src"
     claude_root = tmp_path / ".claude"
     opencode_root = tmp_path / ".opencode"
@@ -168,7 +180,8 @@ def test_opencode_auto_video_frontmatter_includes_command_fields(tmp_path: Path)
     _write_workflow(
         src_root,
         "auto-video",
-        "name: auto-video\ndescription: 自动监控\nuser-invocable: true\nargument-hint: \"[集数]\"\n",
+        "name: auto-video\ndescription: 自动监控\nuser-invocable: true\n"
+        "argument-hint: \"[集数]\"\n",
         "正文\n",
     )
 
@@ -186,5 +199,4 @@ def test_opencode_auto_video_frontmatter_includes_command_fields(tmp_path: Path)
     assert fm.get("agent") == "build"
     assert fm.get("subtask") is True
     assert fm.get("description") == "自动监控"
-    # opencode commands 不含 name 字段（以文件名为准）
     assert "name" not in fm
