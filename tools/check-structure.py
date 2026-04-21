@@ -380,11 +380,38 @@ def check_runtime_config_consistency(
       - agents.<owner> 列出的所有 skill 名 = src/skills/ 子目录全集（一一对应）
       - workflows.user_invocable + workflows.internal = src/workflows/*.md 全集
       - agents 字典的 keys = src/agents/*.md 文件名（去后缀）全集
+      - workflows.opencode_degrade 必须为空 list（auto-video 已通过 sleep-loop
+        在两端原生支持，degrade 机制已退役；保留 key 仅为未来扩展）
+      - 顶层不得再出现 opencode_degrade_template key（已与 degrade 机制一同退役）
     """
     violations: list[str] = []
 
     agents_cfg = config.get("agents", {}) or {}
     workflows_cfg = config.get("workflows", {}) or {}
+
+    # opencode_degrade 已退役：列表必须存在且为空，模板 key 必须缺失
+    opencode_degrade = workflows_cfg.get("opencode_degrade")
+    if opencode_degrade is None:
+        violations.append(
+            "runtime_config: workflows.opencode_degrade key 缺失"
+            "（须保留为空 list 以记录该机制已退役）"
+        )
+    elif not isinstance(opencode_degrade, list):
+        violations.append(
+            f"runtime_config: workflows.opencode_degrade 必须是 list（得到 "
+            f"{type(opencode_degrade).__name__}）"
+        )
+    elif opencode_degrade:
+        violations.append(
+            f"runtime_config: workflows.opencode_degrade 必须为空 list（当前: "
+            f"{opencode_degrade}）。auto-video 已通过 in-session sleep-loop "
+            f"在两端原生支持，不再需要 degrade 模板。"
+        )
+    if "opencode_degrade_template" in config:
+        violations.append(
+            "runtime_config: 顶层不得再出现 opencode_degrade_template key"
+            "（已随 degrade 机制一同退役）"
+        )
 
     # 反转 agents → 业务 skill 集合
     declared_skills: set[str] = set()

@@ -546,7 +546,10 @@ def build_workflows(
         - Claude（所有 workflow）：.claude/skills/<name>/SKILL.md
         - opencode user_invocable：.opencode/commands/<name>.md
         - opencode internal：.opencode/skills/<name>/SKILL.md
-        - opencode auto-video：.opencode/commands/auto-video.md（正文 = 降级模板）
+
+    注：历史曾对 opencode 端的 auto-video 走「降级模板」分支，自 sleep-loop
+    改造后所有 user_invocable workflow 走同一条 invoke 展开路径，不再特殊化。
+    runtime-config.yml 仍保留 opencode_degrade 空列表以备未来扩展。
     """
     src_workflows_dir = src_root / "workflows"
     if not src_workflows_dir.exists():
@@ -557,9 +560,7 @@ def build_workflows(
     workflows_cfg = config.get("workflows", {}) or {}
     user_invocable = set(workflows_cfg.get("user_invocable", []) or [])
     internal = set(workflows_cfg.get("internal", []) or [])
-    opencode_degrade = set(workflows_cfg.get("opencode_degrade", []) or [])
     workflow_set = user_invocable | internal
-    degrade_template_map = config.get("opencode_degrade_template", {}) or {}
 
     skill_to_owner = build_skill_to_owner_index(config)
     business_skill_set = set(skill_to_owner.keys())
@@ -627,24 +628,15 @@ def build_workflows(
 
         # ---- opencode 端 ----
         if is_user_invocable:
-            # 正文：默认展开 invoke；auto-video 等 degrade 用降级模板替换
-            if wf_name in opencode_degrade:
-                if wf_name not in degrade_template_map:
-                    raise ValueError(
-                        f"workflow '{wf_name}' 在 opencode_degrade 列表中但 "
-                        f"opencode_degrade_template 缺少对应条目。"
-                    )
-                opencode_body = degrade_template_map[wf_name]
-            else:
-                opencode_body = _process_workflow_body(
-                    raw_body,
-                    runtime="opencode",
-                    config=config,
-                    skill_to_owner=skill_to_owner,
-                    business_skill_set=business_skill_set,
-                    workflow_set=workflow_set,
-                    src_path=wf_file,
-                )
+            opencode_body = _process_workflow_body(
+                raw_body,
+                runtime="opencode",
+                config=config,
+                skill_to_owner=skill_to_owner,
+                business_skill_set=business_skill_set,
+                workflow_set=workflow_set,
+                src_path=wf_file,
+            )
             # commands frontmatter：description + agent + subtask + argument-hint（无 name）
             src_meta_no_name = {
                 k: v for k, v in post.metadata.items()

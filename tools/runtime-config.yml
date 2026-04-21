@@ -5,10 +5,10 @@
 # tools/check-structure.py 据此校验源结构与产物一致性。
 #
 # 顶层 keys：
-#   agents                    业务 skill 与 agent owner 的归属映射（合并去重后恰好 28 项业务 skill）
-#   runtimes                  两端平台变换规则（claude / opencode）
-#   workflows                 9 个 user_invocable + 2 个 internal + 1 个 opencode_degrade
-#   opencode_degrade_template auto-video 在 opencode 端的降级提示文案
+#   agents     业务 skill 与 agent owner 的归属映射（合并去重后恰好 28 项业务 skill）
+#   runtimes   两端平台变换规则（claude / opencode）
+#   workflows  9 个 user_invocable + 2 个 internal（auto-video 已通过 in-session
+#              sleep-loop 实现两端原生支持，不再需要 opencode 降级模板）
 
 # ---------------------------------------------------------------------------
 # 业务 skill 与 agent 的归属映射（28 个业务 skill 合并去重）
@@ -88,8 +88,11 @@ runtimes:
     arguments_index_offset: 1             # $ARGUMENTS[N] → $<N+1>
 
 # ---------------------------------------------------------------------------
-# Workflow 列表（特殊处理）
+# Workflow 列表
 # ---------------------------------------------------------------------------
+# 历史保留 key `opencode_degrade`：当前为空。auto-video 通过 in-session sleep-loop
+# 在两端原生支持，不再需要 opencode 端降级模板（参见 src/workflows/auto-video.md）。
+# 该 key 保留以便未来若有新的 opencode 不兼容能力可重新启用降级机制。
 workflows:
   user_invocable:
     - series-video
@@ -100,26 +103,8 @@ workflows:
     - short-repair-story
     - generate-video
     - check-video
-    - auto-video                # opencode 端降级
+    - auto-video
   internal:
     - new-story
     - continue-story
-  opencode_degrade:
-    - auto-video                # opencode 端用降级模板，不展开 invoke 块
-
-# ---------------------------------------------------------------------------
-# auto-video 在 opencode 端的降级提示模板（多行字符串）
-# ---------------------------------------------------------------------------
-opencode_degrade_template:
-  auto-video: |
-    `/auto-video` 在 opencode 端不支持自动定时监控（依赖 Cron 工具组）。
-    请使用操作系统调度调用 `/check-video <ep>`：
-
-    **macOS / Linux (cron)**：
-    ```
-    */5 * * * * cd /path/to/project && opencode run "/check-video ep01"
-    ```
-
-    **macOS (launchd)**：见 README "OS 调度" 章节
-
-    **Windows (Task Scheduler)**：见 README "OS 调度" 章节
+  opencode_degrade: []
