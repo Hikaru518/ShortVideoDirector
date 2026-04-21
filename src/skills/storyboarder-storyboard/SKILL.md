@@ -11,7 +11,7 @@ description: Storyboarder将小说原文转化为完整分镜提示词。包含�
 - `story/episodes/$ARGUMENTS[0]/novel.md` — 必须读取
 - `story/episodes/$ARGUMENTS[0]/outline.md` — 必须读取（含资产清单）
 - `config.md` — 必须读取
-- 根据 $ARGUMENTS[0] 计算上一集集数（如 $ARGUMENTS[0] 为 ep02 则上一集为 ep01），读取 `story/episodes/{上一集}/outline.md` — 若上一集存在则读取
+- 根据 `$ARGUMENTS[0]` 计算上一集集数（如 `$ARGUMENTS[0]` 为 ep02 则上一集为 ep01），读取 `story/episodes/{上一集}/outline.md` — 若上一集存在则读取
 - `story/episodes/{上一集}/storyboard.md` — 若存在则读取末尾 2-3 个镜头
 - `skills/storyboarder-storyboard/rules.md` — 必须读取并严格遵循（输出格式、字段约束、规则）
 
