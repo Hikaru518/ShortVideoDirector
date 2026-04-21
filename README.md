@@ -60,7 +60,9 @@ opencode
 | `/short-repair-story` | 可用 | 可用 |
 | `/generate-video` | 可用 | 可用 |
 | `/check-video` | 可用 | 可用 |
-| `/auto-video` | 原生支持（依赖 Cron 工具组） | **降级**：用 OS 调度（cron / launchd / Task Scheduler）周期性调用 `/check-video`，详见 [CLAUDE.md — auto-video 在 opencode 端的 OS 调度替代](CLAUDE.md#auto-video-在-opencode-端的-os-调度替代) |
+| `/auto-video` | 原生支持（in-session sleep-loop） | 原生支持（in-session sleep-loop） |
+
+> `/auto-video` 通过 LLM 会话内的 sleep-loop 实现，不再依赖宿主级调度（Cron / launchd / Task Scheduler）。轮询在当前会话内进行，关闭会话即终止；内置安全上限（最多 24 轮 / 8 小时）。如需脱离会话长时间后台运行，可改用 OS 级 cron 周期性触发 `/check-video --auto`，参见 [OS 调度（可选 advanced）](#os-调度可选-advanced)。
 
 ## 功能
 
@@ -101,7 +103,7 @@ opencode
 
 ## 使用
 
-下列所有命令在 Claude Code 与 opencode 端调用方式与行为一致；唯一例外是 `/auto-video` 在 opencode 端会显示 OS 调度替代说明，参见 [双端能力对照](#双端能力对照)。
+下列所有命令在 Claude Code 与 opencode 端调用方式与行为一致。
 
 ```bash
 # 开始新故事（提供输入）
@@ -174,13 +176,23 @@ opencode
 /check-video ep01 --auto                # 自动模式，只重试可重试的失败
 /check-video all --auto                 # 检查所有集
 
-# 启动/管理视频生成定时监控（仅 Claude Code 原生支持；opencode 端用 OS 调度替代）
+# 启动/管理视频生成在会话内自动监控（两端均原生支持）
 /auto-video ep01                        # 监控 ep01，默认每 20 分钟检查
 /auto-video ep01 300                    # 自定义间隔（秒）
 /auto-video all                         # 监控所有集
 ```
 
-> `/auto-video` 在 opencode 端会展示降级说明，需借助 cron / launchd / Task Scheduler 周期性触发 `/check-video`。完整示例见 [CLAUDE.md — auto-video 在 opencode 端的 OS 调度替代](CLAUDE.md#auto-video-在-opencode-端的-os-调度替代)。
+> `/auto-video` 在两端都通过当前 LLM 会话内的 sleep-loop 实现自动轮询：每隔指定间隔起一个 sub-agent 调 `/check-video --auto`，全部完成或不可恢复错误时自动停止；内置安全上限 24 轮 / 8 小时。**关闭会话即终止**。如需脱离会话长时间运行，参考 [OS 调度（可选 advanced）](#os-调度可选-advanced)。
+
+### OS 调度（可选 advanced）
+
+`/auto-video` 已通过 in-session sleep-loop 在两端原生可用；**绝大多数场景下不需要 OS 级调度**。仅在以下情形可考虑用 OS 级 cron 直接周期性触发 `/check-video <ep> --auto`：
+
+- 需要长时间（>8 小时）后台轮询，且不希望保持 LLM 会话窗口开启
+- 无人值守批量处理多个项目目录
+- CI / 服务器环境，无法保留 interactive 会话
+
+完整 cron / launchd / Task Scheduler 示例见 [CLAUDE.md — 可选：OS 级周期触发](CLAUDE.md#可选os-级周期触发)。注意 OS 调度无法替代 `/auto-video` 的"全部完成自动停止"语义，需自己根据 `/check-video --auto` 输出的 JSON 摘要（`all_complete=true`）判断停止条件并手动 disable。
 
 ## 生成的目录结构
 
@@ -339,7 +351,7 @@ ShortVideoDirector/
 ├── tools/                          # ★ 构建与校验工具
 │   ├── build.py                    # 从 src/ 编译生成 .claude/ 与 .opencode/
 │   ├── check-structure.py          # 结构与一致性校验
-│   ├── runtime-config.yml          # owner 映射、双端变换规则、降级模板
+│   ├── runtime-config.yml          # owner 映射、双端变换规则、invoke 模板
 │   └── tests/                      # pytest 测试
 ├── .claude/                        # Claude Code 产物（构建生成，勿手改）
 │   ├── skills/
@@ -395,7 +407,7 @@ ShortVideoDirector/
 
 ## 进一步阅读
 
-- [CLAUDE.md](CLAUDE.md) — 项目权威指令文档：双 runtime 架构、用户入口、内部 workflow、跨 runtime 调用约定、auto-video OS 调度替代、贡献规范、常见问题。
+- [CLAUDE.md](CLAUDE.md) — 项目权威指令文档：双 runtime 架构、用户入口、内部 workflow、跨 runtime 调用约定、auto-video sleep-loop 与可选 OS 级周期触发、贡献规范、常见问题。
 - [docs/plans/2026-04-20-16-32/opencode-compat-technical-design.md](docs/plans/2026-04-20-16-32/opencode-compat-technical-design.md) — 双 runtime 改造的完整技术设计与 ADR 列表。
 - [docs/plans/2026-04-20-16-32/opencode-compat-implementation-plan.md](docs/plans/2026-04-20-16-32/opencode-compat-implementation-plan.md) — 实施计划与 task 拆分。
-- [tools/runtime-config.yml](tools/runtime-config.yml) — owner 映射、双端变换规则、降级模板的权威配置。
+- [tools/runtime-config.yml](tools/runtime-config.yml) — owner 映射、双端变换规则、invoke 模板的权威配置。

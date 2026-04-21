@@ -13,7 +13,7 @@
 | 用户入口 workflow 形态 | `user-invocable: true` 的 skill，在斜杠菜单中显示 `/<workflow-name>` | `commands/<workflow-name>.md`，通过 `/<workflow-name>` 触发 |
 | 业务 skill 加载形态 | Skill tool 加载 | task 工具的子会话内通过 skill 工具加载 |
 | 角色 agent 形态 | plugin 注入的 subagent | `mode: subagent` 的 agent |
-| auto-video（OS 调度） | 原生支持 | 降级为提示文档，依赖外部 cron / launchd / Task Scheduler |
+| `/auto-video` 轮询机制 | in-session sleep-loop（关闭会话即终止） | in-session sleep-loop（关闭会话即终止） |
 
 > **重要：** 不要直接编辑 `.claude/` 或 `.opencode/`，所有改动都从 `src/` 出发，跑 `uv run tools/build.py` 重新生成产物。详见 [如何贡献](#如何贡献)。
 
@@ -84,14 +84,13 @@
   - `/check-video ep01`
   - `/check-video ep01 --auto` — 自动下载、自动重试
 
-### 1 个降级入口
-
 #### `/auto-video`
 
-- **用途**：创建定时任务自动监控视频生成状态，下载完成视频，重试因并行限制失败的任务。任务全部完成后自动停止。
+- **用途**：在当前会话内循环监控视频生成状态：每隔指定间隔起一个 sub-agent 调 `/check-video {目标} --auto`，根据 JSON 摘要判断是否继续；全部完成或遇到不可恢复错误时自动停止；同时内置安全上限（最多 24 轮 / 8 小时），命中即退出。
 - **参数**：`[集数|all] [检查间隔秒数]`
 - **调用样例**：`/auto-video ep01 300`
-- **平台差异**：仅在 Claude Code 上原生可用（依赖 Cron 工具组）。在 opencode 端 `/auto-video` 会展示降级说明文档，需要使用操作系统级别的调度替代，参见 [auto-video 在 opencode 端的 OS 调度替代](#auto-video-在-opencode-端的-os-调度替代)。
+- **跨端行为**：Claude Code 与 opencode 完全等价，均通过 in-session sleep-loop 实现，不依赖任何宿主级调度（Cron / launchd / Task Scheduler）。
+- **会话生命周期**：循环在当前 LLM 会话内运行，关闭会话即终止。如需脱离会话调度，可改用 OS 级 cron 周期性触发 `/check-video`，参见 [可选：OS 级周期触发](#可选os-级周期触发)。
 
 ## Internal workflow
 
@@ -209,9 +208,15 @@ args: ""
 
 带参数时同理：源里 `args: "{用户偏好描述}"` 在 Claude 端展开为「，传递参数：`{用户偏好描述}`」，在 opencode 端展开为「，参数：{用户偏好描述}」。invoke 模板与短语全部集中在 `tools/runtime-config.yml.runtimes.<runtime>.invoke_template` 中维护。
 
-## auto-video 在 opencode 端的 OS 调度替代
+## 可选：OS 级周期触发
 
-`/auto-video` 在 opencode 端不支持自动定时监控（依赖 Cron 工具组）。请使用操作系统调度调用 `/check-video <ep>`：
+`/auto-video` 已通过 in-session sleep-loop 在两端原生可用，**绝大多数场景下不需要 OS 级调度**。仅在以下情形可考虑改用 OS 调度：
+
+- 需要长时间（>8 小时）后台轮询，且不希望保持 LLM 会话窗口开启
+- 需要无人值守批量处理多个项目目录
+- CI / 服务器环境，无法保留 interactive 会话
+
+在这些场景下，可让操作系统周期性触发 `/check-video <ep> --auto`，等价于一个外部驱动的 sleep-loop（缺少安全上限，需要自己监控停止条件）。
 
 ### macOS / Linux (cron)
 
@@ -221,10 +226,10 @@ args: ""
 crontab -e
 ```
 
-添加一行（每 5 分钟检查一次 ep01）：
+添加一行（每 5 分钟检查一次 ep01；Claude Code 端把 `opencode run` 换成 `claude --print`）：
 
 ```
-*/5 * * * * cd /path/to/project && opencode run "/check-video ep01"
+*/5 * * * * cd /path/to/project && opencode run "/check-video ep01 --auto"
 ```
 
 ### macOS (launchd)
@@ -243,7 +248,7 @@ crontab -e
   <array>
     <string>/bin/sh</string>
     <string>-c</string>
-    <string>cd /path/to/project &amp;&amp; opencode run "/check-video ep01"</string>
+    <string>cd /path/to/project &amp;&amp; opencode run "/check-video ep01 --auto"</string>
   </array>
   <key>StartInterval</key>
   <integer>300</integer>
@@ -262,9 +267,9 @@ launchctl load ~/Library/LaunchAgents/com.user.shortvideo.checkvideo.plist
 打开「任务计划程序」→「创建基本任务」：
 
 - **触发器**：每 5 分钟
-- **操作**：启动程序 `cmd.exe`，参数 `/c cd /d C:\path\to\project && opencode run "/check-video ep01"`
+- **操作**：启动程序 `cmd.exe`，参数 `/c cd /d C:\path\to\project && opencode run "/check-video ep01 --auto"`
 
-完成后 Windows 会按设定的间隔自动调用 `/check-video`，行为等价于 Claude Code 端的 `/auto-video`。
+OS 调度只能驱动 `/check-video --auto`，无法替代 `/auto-video` 的"全部完成自动停止"语义；停止条件需自己根据 `/check-video --auto` 输出的 JSON 摘要（`all_complete=true`）判断并手动 disable cron 项。
 
 ## 如何贡献
 
@@ -275,7 +280,7 @@ launchctl load ~/Library/LaunchAgents/com.user.shortvideo.checkvideo.plist
 | `src/skills/` | 28 个业务 skill 源 | **是** |
 | `src/agents/` | 5 个角色 agent 源 | **是** |
 | `src/workflows/` | 11 个 workflow 源 | **是** |
-| `tools/runtime-config.yml` | owner 映射、双端变换规则、降级模板 | **是** |
+| `tools/runtime-config.yml` | owner 映射、双端变换规则、invoke 模板 | **是** |
 | `.claude/` | Claude Code 编译产物 | 否 |
 | `.opencode/` | opencode 编译产物 | 否 |
 
@@ -300,7 +305,7 @@ launchctl load ~/Library/LaunchAgents/com.user.shortvideo.checkvideo.plist
 
 - **「我编辑了 `src/skills/X` 但没看到效果」** — 产物没重新生成。跑 `uv run tools/build.py`，确认 `.claude/skills/X/`、`.opencode/skills/X/` 已更新，再重新触发。
 - **「PR CI 报 git diff 不一致」** — 你只 commit 了 `src/`，没 commit 编译产物。本地跑 `uv run tools/build.py`，`git add .claude .opencode`，再 push。
-- **「opencode 端调用 `/auto-video` 提示降级」** — 这是设计行为（ADR-006）。opencode 端无 Cron 工具组，请按 [auto-video 在 opencode 端的 OS 调度替代](#auto-video-在-opencode-端的-os-调度替代) 配置 cron / launchd / Task Scheduler。
+- **「`/auto-video` 关掉会话后停止了」** — 这是设计行为：循环在当前 LLM 会话内运行，关闭即终止。需要无人值守长时间运行时改用 OS 级调度，参见 [可选：OS 级周期触发](#可选os-级周期触发)。
 - **「如何添加新业务 skill」** — 在 `src/skills/<name>/SKILL.md` 创建源文件（带 `name` 与 `description` 前置元数据），并在 `tools/runtime-config.yml` 的 `agents.<owner>` 下注册到对应角色，最后跑 `build.py` 与 `check-structure.py`。
 - **「workflow 里如何调其他 skill」** — 用 \`\`\`invoke 块（`skill: <name>`、`args: "..."`），不要写死任一平台的具体调用句式，build.py 会按 [invoke 协议](#invoke-协议源代码格式) 在双端展开。
 - **「为什么 opencode 端首轮没有项目上下文？」** — opencode 不自动加载 `CLAUDE.md`。手动执行 `cat CLAUDE.md` 或在 system prompt 中粘贴关键章节即可。
@@ -310,4 +315,4 @@ launchctl load ~/Library/LaunchAgents/com.user.shortvideo.checkvideo.plist
 - [README.md](README.md) — 用户安装、详细使用说明、示例工作流。
 - [docs/plans/2026-04-20-16-32/opencode-compat-technical-design.md](docs/plans/2026-04-20-16-32/opencode-compat-technical-design.md) — 双 runtime 改造的完整技术设计与 ADR 列表。
 - [docs/plans/2026-04-20-16-32/opencode-compat-implementation-plan.md](docs/plans/2026-04-20-16-32/opencode-compat-implementation-plan.md) — 实现计划与 task 拆分。
-- [tools/runtime-config.yml](tools/runtime-config.yml) — owner 映射、双端变换规则、降级模板的权威配置。
+- [tools/runtime-config.yml](tools/runtime-config.yml) — owner 映射、双端变换规则、invoke 模板的权威配置。
