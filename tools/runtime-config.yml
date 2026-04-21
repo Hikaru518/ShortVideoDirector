@@ -1,0 +1,125 @@
+# tools/runtime-config.yml
+#
+# 集中化的平台变换配置（ADR-003）。
+# tools/build.py 据此为 Claude Code 与 opencode 两端各生成一份产物。
+# tools/check-structure.py 据此校验源结构与产物一致性。
+#
+# 顶层 keys：
+#   agents                    业务 skill 与 agent owner 的归属映射（合并去重后恰好 28 项业务 skill）
+#   runtimes                  两端平台变换规则（claude / opencode）
+#   workflows                 9 个 user_invocable + 2 个 internal + 1 个 opencode_degrade
+#   opencode_degrade_template auto-video 在 opencode 端的降级提示文案
+
+# ---------------------------------------------------------------------------
+# 业务 skill 与 agent 的归属映射（28 个业务 skill 合并去重）
+# ---------------------------------------------------------------------------
+agents:
+  director:
+    - director-arc
+    - director-fix-outline
+    - director-input-confirm
+    - director-outline
+    - director-plot-options
+    - director-review-novel
+    - director-review-script
+    - director-review-storyboard
+    - short-fix-outline
+    - short-input-confirm
+    - short-outline
+    - short-plot-options
+    - short-review-storyboard
+  writer:
+    - writer-novel
+    - writer-fix-novel
+  scriptwriter:
+    - scriptwriter-script
+    - scriptwriter-fix-script
+  storyboarder:
+    - storyboarder-asset-list
+    - storyboarder-storyboard
+    - storyboarder-fix-storyboard
+    - short-storyboard
+    - short-fix-storyboard
+  creator:
+    - creator-create-assets
+    - creator-fix-asset
+    - creator-generate-images
+    - creator-image-dreamina
+    - creator-update-records
+    - creator-video-dreamina
+
+# ---------------------------------------------------------------------------
+# 平台变换规则
+# ---------------------------------------------------------------------------
+runtimes:
+  claude:
+    business_skill_inject:
+      user-invocable: false
+      context: fork
+      # agent 字段由 build.py 查 agents mapping 注入
+    workflow_user_invocable_inject:
+      user-invocable: true
+      allowed-tools: "Read, Write, Edit, Glob, Bash, Skill, Agent"
+    workflow_internal_inject:
+      user-invocable: false
+      allowed-tools: "Read, Write, Edit, Glob, Bash, Skill"
+    agent_inject:
+      tools: "Read, Write, Edit, Glob, Grep, Bash, Skill"
+      model: inherit
+    invoke_template: |
+      使用 Skill tool 调用 `{skill}` skill{args_phrase}
+    invoke_no_args_phrase: "（无参数）"
+    invoke_with_args_phrase: "，传递参数：`{args}`"
+
+  opencode:
+    business_skill_inject: {}             # 无注入字段
+    workflow_user_invocable_inject:
+      agent: build
+      subtask: true
+    workflow_internal_inject:
+      agent: build
+      subtask: true
+    agent_inject:
+      mode: subagent
+    invoke_template: |
+      调用 task 工具，传入 agent: `{owner}`，prompt: "执行 {skill} skill 描述的任务{args_phrase}"
+    invoke_no_args_phrase: "，无额外参数"
+    invoke_with_args_phrase: "，参数：{args}"
+    arguments_index_offset: 1             # $ARGUMENTS[N] → $<N+1>
+
+# ---------------------------------------------------------------------------
+# Workflow 列表（特殊处理）
+# ---------------------------------------------------------------------------
+workflows:
+  user_invocable:
+    - series-video
+    - short-video
+    - series-edit-story
+    - short-edit-story
+    - series-repair-story
+    - short-repair-story
+    - generate-video
+    - check-video
+    - auto-video                # opencode 端降级
+  internal:
+    - new-story
+    - continue-story
+  opencode_degrade:
+    - auto-video                # opencode 端用降级模板，不展开 invoke 块
+
+# ---------------------------------------------------------------------------
+# auto-video 在 opencode 端的降级提示模板（多行字符串）
+# ---------------------------------------------------------------------------
+opencode_degrade_template:
+  auto-video: |
+    `/auto-video` 在 opencode 端不支持自动定时监控（依赖 Cron 工具组）。
+    请使用操作系统调度调用 `/check-video <ep>`：
+
+    **macOS / Linux (cron)**：
+    ```
+    */5 * * * * cd /path/to/project && opencode run "/check-video ep01"
+    ```
+
+    **macOS (launchd)**：见 README "OS 调度" 章节
+
+    **Windows (Task Scheduler)**：见 README "OS 调度" 章节
